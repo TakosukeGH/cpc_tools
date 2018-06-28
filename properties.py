@@ -18,16 +18,8 @@ logger = logging.getLogger("cpc_exporter")
 
 # Properties
 class CPCSceneProperties(PropertyGroup):
-    height = IntProperty(name="Height", min=4, max=65536, default=1080)
-    width = IntProperty(name="Width", min=4, max=65536, default=1920)
-    scale = FloatProperty(name="Scale", min=0.00001, max=100000.0, step=1, default=100.0, precision=3)
-    export_path = StringProperty(name="Export path", subtype='FILE_PATH', description="Export path", default="//sample.svg")
-    draw_area = BoolProperty(default=False)
     slide = FloatProperty(name="Slide", step=10, default=0.1)
-    use_background = BoolProperty(name="Use backGround", default=False)
-    background_color = FloatVectorProperty(name="Background Color", subtype='COLOR', size=4, min=0, max=1, default=[0.8, 0.8, 0.8, 0.8])
     script_is_executed = BoolProperty(default=False)
-    lock_init_project = BoolProperty(default=True)
 
 # Operator
 class InitProjectOperator(bpy.types.Operator):
@@ -43,7 +35,7 @@ class InitProjectOperator(bpy.types.Operator):
     use_gpu = True
 
     node_group_name = "paper"
-    img_size = image_size.px2048
+    img_size = image_size.px512
     img_name = "drawing_paper_{0}.png".format(img_size)
 
     def invoke(self, context, event):
@@ -87,6 +79,7 @@ class InitProjectOperator(bpy.types.Operator):
     def scene_setting(self, scene):
         scene.render.engine = 'CYCLES'
         scene.use_nodes = True
+        scene.layers = self.get_layers([0, 10])
 
     def render_setting(self, render):
         render.engine = 'CYCLES'
@@ -235,7 +228,7 @@ class InitProjectOperator(bpy.types.Operator):
         group.links.new(node_bsdf.outputs[0], group_outputs.inputs["BSDF"])
 
     def add_base(self, context):
-        name = "base"
+        name = "cpc_base"
 
         bpy.ops.mesh.primitive_plane_add(radius=5.0,calc_uvs=True,location=(0.0, 0.0, 0.0),layers=self.get_layers([10]))
         obj = context.object
@@ -246,7 +239,7 @@ class InitProjectOperator(bpy.types.Operator):
         obj.cycles_visibility.transmission = False
         obj.cycles_visibility.scatter = False
 
-        mat = self.add_base_material(name, (1.0, 1.0, 1.0, 1.0))
+        mat = self.add_base_material("pcp_base_material", (1.0, 1.0, 1.0, 1.0))
 
         obj.active_material = mat
 
@@ -286,13 +279,14 @@ class InitProjectOperator(bpy.types.Operator):
         return mat
 
     def add_light(self, context):
-        name = "light"
+        name = "cpc_light"
 
         bpy.ops.mesh.primitive_plane_add(radius=50.0,location=(0.0, 0.0, 50.0),layers=self.get_layers([10]))
         obj = context.object
         obj.name = name
         obj.data.name = name
         obj.draw_type = 'WIRE'
+        obj.cycles_visibility.camera = False
 
         mat = self.add_material(name)
         nodes = mat.node_tree.nodes
@@ -326,29 +320,18 @@ class CPCToolPanel(Panel):
     def draw(self, context):
         cpc_scene_properties = context.scene.cpc_scene_properties
 
+        if not cpc_scene_properties.script_is_executed:
+            layout = self.layout
+            layout.operator(InitProjectOperator.bl_idname, text=pgettext(InitProjectOperator.bl_label))
+            return
+
         layout = self.layout
 
-        split = layout.split(percentage=0.85)
-        col = split.column()
-        col.operator(InitProjectOperator.bl_idname, text=pgettext(InitProjectOperator.bl_label))
-
-        if cpc_scene_properties.lock_init_project:
-            col.enabled = False
-
-        col = split.column()
-        if cpc_scene_properties.lock_init_project:
-            icon = 'LOCKED'
-        else:
-            icon = 'UNLOCKED'
-        col.prop(cpc_scene_properties, "lock_init_project", text="", icon=icon)
-
-        if cpc_scene_properties.script_is_executed:
-            split.enabled = False
+        col = layout.column(align=True)
+        col.operator(AddCurveTool.bl_idname, icon='CURVE_BEZCIRCLE')
+        col.operator(AddMeshTool.bl_idname, icon='MESH_GRID')
 
         layout.row().separator()
-
-        row = layout.row()
-        row.operator(AddCurveTool.bl_idname, icon='CURVE_BEZCIRCLE')
 
         col = layout.column(align=True)
         row = col.row(align=True)
@@ -356,6 +339,15 @@ class CPCToolPanel(Panel):
         row.operator(DownObject.bl_idname, icon='TRIA_DOWN')
         col.prop(cpc_scene_properties, "slide")
         col.operator(ResetObject.bl_idname, icon='X')
+
+        col = layout.column(align=True)
+
+        col.label(text="Group:")
+        col.operator("group.create", text="New Group")
+        col.operator("group.objects_add_active", text="Add to Active")
+        col.operator("group.objects_remove", text="Remove from Group")
+        props = col.operator("object.select_grouped", text="Grouped")
+        props.type = 'GROUP'
 
         layout.row().separator()
 
@@ -377,7 +369,7 @@ class AddCurveTool(Operator):
     bl_label = "Add curve"
 
     def invoke(self, context, event):
-        loc=(0.0, 0.0, 0.0)
+        loc=(0.0, 0.0, 0.1)
         if len(context.selected_objects) > 0:
             loc = (context.object.location[0], context.object.location[1], context.object.location[2] + 0.1)
 
@@ -391,9 +383,42 @@ class AddCurveTool(Operator):
         curve.dimensions = '2D'
         curve.resolution_u = 5
 
-        mat = bpy.data.materials.new(name="svg_material")
+        if "pcp_base_material" in bpy.data.materials:
+            mat = bpy.data.materials["pcp_base_material"]
+        else:
+            mat = bpy.data.materials.new(name="cpc_material")
         mat.diffuse_color = (1.0, 1.0, 1.0)
         curve.materials.append(mat)
+
+        return {'FINISHED'}
+
+class AddMeshTool(Operator):
+    bl_idname = "cpc.addgrid"
+    bl_label = "Add grid"
+
+    def invoke(self, context, event):
+        loc=(0.0, 0.0, 0.1)
+        if len(context.selected_objects) > 0:
+            loc = (context.object.location[0], context.object.location[1], context.object.location[2] + 0.1)
+
+        bpy.ops.mesh.primitive_grid_add(x_subdivisions=3, y_subdivisions=3, location=loc)
+        obj = context.object
+
+        obj.lock_location[2] = True
+
+        mod = obj.modifiers.new(name="Subsurf", type='SUBSURF')
+        mod.levels = 3
+        mod.render_levels = 3
+
+        mash = obj.data
+
+        if "pcp_base_material" in bpy.data.materials:
+            mat = bpy.data.materials["pcp_base_material"]
+        else:
+            mat = bpy.data.materials.new(name="cpc_material")
+            mat.diffuse_color = (1.0, 1.0, 1.0)
+
+        mash.materials.append(mat)
 
         return {'FINISHED'}
 
