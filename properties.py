@@ -18,6 +18,19 @@ logger = logging.getLogger("cpc_exporter")
 
 # Properties
 class CPCSceneProperties(PropertyGroup):
+    image_size = EnumProperty(
+        items = [
+            ('0',"512 x 512",'','IMAGE_DATA',0),
+            ('1',"1024 x 1024",'','IMAGE_DATA',1),
+            ('2',"2048 x 2048",'','IMAGE_DATA',2),
+            ('3',"4096 x 4096",'','IMAGE_DATA',3),
+            ('4',"8192 x 8192",'','IMAGE_DATA',4)],
+        name="Image Size", description="Image size", default="0")
+    material_type = EnumProperty(
+        items = [
+            ('0',"Paper",'','MATERIAL',0),
+            ('1',"Diffuse",'','MATERIAL',1)],
+        name="Material Type", description="Material type", default="0")
     slide = FloatProperty(name="Slide", step=10, default=0.1)
     script_is_executed = BoolProperty(default=False)
 
@@ -27,16 +40,12 @@ class InitProjectOperator(bpy.types.Operator):
     bl_label = "Init Project"
     bl_options = {'REGISTER', 'UNDO'}
 
-    ImageSize = namedtuple("ImageSize", "px512 px1024 px2048 px4096 px8192")
-    image_size = ImageSize(512, 1024, 2048, 4096, 8192)
-    Colors = namedtuple("Colors", "red yellow green cyan blue magenta")
-    colors = Colors(0.0, 0.167, 0.333, 0.5, 0.667, 0.833)
+    image_sizes = (512, 1024, 2048, 4096, 8192)
+    img_name = "drawing_paper_{0}.png".format(512)
 
     use_gpu = True
 
     node_group_name = "paper"
-    img_size = image_size.px512
-    img_name = "drawing_paper_{0}.png".format(img_size)
 
     def invoke(self, context, event):
         logger.info("start")
@@ -54,10 +63,11 @@ class InitProjectOperator(bpy.types.Operator):
 
         # from setting_kirikamie.py
         self.init_compositor(context.scene.node_tree)
-        self.add_image()
+        self.add_image(context)
         self.add_node_group()
         self.add_base(context)
         self.add_light(context)
+        self.add_diffuse_material(context)
 
         context.scene.cpc_scene_properties.script_is_executed = True
 
@@ -157,7 +167,9 @@ class InitProjectOperator(bpy.types.Operator):
         links.new(node_color_balance.outputs[0], node_comp.inputs[0])
         links.new(node_color_balance.outputs[0], node_view.inputs[0])
 
-    def add_image(self):
+    def add_image(self, context):
+        img_size = self.image_sizes[int(context.scene.cpc_scene_properties.image_size)]
+        self.img_name = "drawing_paper_{0}.png".format(img_size)
 
         if self.img_name in bpy.data.images:
             return
@@ -239,7 +251,7 @@ class InitProjectOperator(bpy.types.Operator):
         obj.cycles_visibility.transmission = False
         obj.cycles_visibility.scatter = False
 
-        mat = self.add_base_material("pcp_base_material", (1.0, 1.0, 1.0, 1.0))
+        mat = self.add_base_material("cpc_base_material", (1.0, 1.0, 1.0, 1.0))
 
         obj.active_material = mat
 
@@ -254,6 +266,7 @@ class InitProjectOperator(bpy.types.Operator):
         node_texc.location = -200, 200
 
         node_rgb = nodes.new("ShaderNodeRGB")
+        node_rgb.name = "cpc_color_node"
         node_rgb.location = -200, -100
         node_rgb.outputs[0].default_value = color
 
@@ -303,6 +316,32 @@ class InitProjectOperator(bpy.types.Operator):
 
         obj.active_material = mat
 
+    def add_diffuse_material(self, context):
+        mat = self.add_material("cpc_diffuse_material")
+
+        mat.use_fake_user = True
+
+        nodes = mat.node_tree.nodes
+        for node_del in nodes:
+            nodes.remove(node_del)
+
+        node_rgb = nodes.new("ShaderNodeRGB")
+        node_rgb.name = "cpc_color_node"
+        node_rgb.location = -200, 0
+        node_rgb.outputs[0].default_value = (1.0, 1.0, 1.0, 1.0)
+
+        node_bsdf = nodes.new("ShaderNodeBsdfDiffuse")
+        node_bsdf.location = 0, 0
+
+        node_output = nodes.new("ShaderNodeOutputMaterial")
+        node_output.location = 200, 0
+
+        links = mat.node_tree.links
+        links.new(node_rgb.outputs[0], node_bsdf.inputs[0])
+        links.new(node_bsdf.outputs[0], node_output.inputs[0])
+
+        return mat
+
     def get_layers(self, num_list):
         layers = [False] * 20
         for num in num_list:
@@ -322,10 +361,18 @@ class CPCToolPanel(Panel):
 
         if not cpc_scene_properties.script_is_executed:
             layout = self.layout
-            layout.operator(InitProjectOperator.bl_idname, text=pgettext(InitProjectOperator.bl_label))
+            layout.label("Image Size")
+            layout.prop(cpc_scene_properties, "image_size", text="")
+            layout.row().separator()
+            row = layout.row()
+            row.scale_y = 2.0
+            row.operator(InitProjectOperator.bl_idname, text=pgettext(InitProjectOperator.bl_label), icon='LOAD_FACTORY')
             return
 
         layout = self.layout
+
+        col = layout.column(align=True)
+        col.prop(cpc_scene_properties, "material_type", text="")
 
         col = layout.column(align=True)
         col.operator(AddCurveTool.bl_idname, icon='CURVE_BEZCIRCLE')
@@ -354,14 +401,21 @@ class CPCToolPanel(Panel):
         if context.object is not None:
             obj = context.object
             if obj.type == 'CURVE':
-                row = layout.row()
-                row.prop(obj.data, "resolution_u")
-                if len(obj.data.materials) > 0:
-                    mat = obj.data.materials[0]
-                    col = layout.column(align=True)
-                    col.label("Viewport Color:")
-                    col.prop(mat, "diffuse_color", text="")
-                    col.prop(mat, "alpha")
+                layout.prop(obj.data, "resolution_u")
+
+            elif obj.type =='MESH':
+                if "cpc_subsurf" in obj.modifiers:
+                    mod = obj.modifiers["cpc_subsurf"]
+                    layout.label(text="Subdivisions:")
+                    layout.prop(mod, "levels")
+
+            if obj.type =='MESH' or obj.type == 'CURVE':
+                mat = obj.active_material
+                if "cpc_color_node" in mat.node_tree.nodes:
+                    node = mat.node_tree.nodes["cpc_color_node"]
+                    out = node.outputs[0]
+                    layout.label(text="Color:")
+                    layout.prop(out, "default_value", text="")
 
 # op
 class AddCurveTool(Operator):
@@ -377,16 +431,21 @@ class AddCurveTool(Operator):
         obj = context.object
 
         obj.lock_location[2] = True
+        obj.lock_scale[2] = True
 
         curve = obj.data
 
         curve.dimensions = '2D'
         curve.resolution_u = 5
 
-        if "pcp_base_material" in bpy.data.materials:
-            mat = bpy.data.materials["pcp_base_material"]
+        material_type = context.scene.cpc_scene_properties.material_type
+        if material_type == "0" and "cpc_base_material" in bpy.data.materials:
+            mat = bpy.data.materials["cpc_base_material"]
+        elif material_type == "1" and "cpc_diffuse_material" in bpy.data.materials:
+            mat = bpy.data.materials["cpc_diffuse_material"]
         else:
             mat = bpy.data.materials.new(name="cpc_material")
+
         mat.diffuse_color = (1.0, 1.0, 1.0)
         curve.materials.append(mat)
 
@@ -406,18 +465,21 @@ class AddMeshTool(Operator):
 
         obj.lock_location[2] = True
 
-        mod = obj.modifiers.new(name="Subsurf", type='SUBSURF')
+        mod = obj.modifiers.new(name="cpc_subsurf", type='SUBSURF')
         mod.levels = 3
         mod.render_levels = 3
 
         mash = obj.data
 
-        if "pcp_base_material" in bpy.data.materials:
-            mat = bpy.data.materials["pcp_base_material"]
+        material_type = context.scene.cpc_scene_properties.material_type
+        if material_type == "0" and "cpc_base_material" in bpy.data.materials:
+            mat = bpy.data.materials["cpc_base_material"]
+        elif material_type == "1" and "cpc_diffuse_material" in bpy.data.materials:
+            mat = bpy.data.materials["cpc_diffuse_material"]
         else:
             mat = bpy.data.materials.new(name="cpc_material")
-            mat.diffuse_color = (1.0, 1.0, 1.0)
 
+        mat.diffuse_color = (1.0, 1.0, 1.0)
         mash.materials.append(mat)
 
         return {'FINISHED'}
